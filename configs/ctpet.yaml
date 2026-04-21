@@ -1,0 +1,30 @@
+# TASK NAME
+task_name: ctpet
+
+dataset: "ctpet"
+dataset_name: "ctpet"
+n_channels: 1
+multimodal: False
+batch_correction: False
+batch_key: Null
+use_condition_embeddings: False
+add_controls: False
+normalize: True
+augment_train: True
+iter_ctrl: False
+
+# DIRECTORIES FOR DATA
+image_path: ./datasets/archive
+data_index_path: Null
+embedding_path: Null
+
+# CT/PET SPLIT AND PREPROCESSING
+image_size: 256
+test_split: 0.1
+
+# EVALUATION
+compute_recon_metrics: True
+best_metric: "mae"
+save_visualizations: True
+num_visual_samples: 16
+error_map_mode: "absolute"

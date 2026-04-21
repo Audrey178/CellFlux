@@ -169,6 +169,47 @@ def get_args_parser():
         action="store_true",
         help="Save all samples generated for FID computation.",
     )
+    parser.add_argument(
+        "--compute_recon_metrics",
+        action="store_true",
+        help="Compute paired reconstruction metrics such as MAE, SSIM, PSNR, and LPIPS.",
+    )
+    parser.add_argument(
+        "--best_metric",
+        default="mae",
+        type=str,
+        help="Metric used to track and save the best checkpoint.",
+    )
+    parser.add_argument(
+        "--save_visualizations",
+        action="store_true",
+        help="Save CT/PET prediction grids during evaluation.",
+    )
+    parser.add_argument(
+        "--num_visual_samples",
+        default=16,
+        type=int,
+        help="Number of deterministic test samples to visualize during evaluation.",
+    )
+    parser.add_argument(
+        "--error_map_mode",
+        default="absolute",
+        type=str,
+        choices=["absolute"],
+        help="How to compute the PET reconstruction error map.",
+    )
+    parser.add_argument(
+        "--image_size",
+        default=256,
+        type=int,
+        help="Square resolution used for CT/PET slices.",
+    )
+    parser.add_argument(
+        "--test_split",
+        default=0.1,
+        type=float,
+        help="Fraction of ctpet samples reserved for the test split.",
+    )
     parser.add_argument("--num_workers", default=10, type=int)
     parser.add_argument(
         "--pin_mem",

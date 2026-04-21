@@ -32,6 +32,8 @@ def save_model(
                 "epoch": epoch,
                 "scaler": loss_scaler.state_dict(),
                 "args": args,
+                "best_metric_name": getattr(args, "best_metric", None),
+                "best_metric_value": getattr(args, "best_metric_value", None),
             }
 
             save_on_master(to_save, checkpoint_path)
@@ -44,6 +46,41 @@ def save_model(
         )
 
 
+def best_metric_default(metric_name):
+    return float("inf") if metric_name in {"mae", "lpips"} else float("-inf")
+
+
+def is_better_metric(metric_name, metric_value, current_best):
+    if metric_name in {"mae", "lpips"}:
+        return metric_value < current_best
+    return metric_value > current_best
+
+
+def save_best_model(
+    args,
+    epoch,
+    metric_name,
+    metric_value,
+    model_without_ddp,
+    optimizer,
+    lr_schedule,
+    loss_scaler,
+):
+    output_dir = Path(args.output_dir)
+    checkpoint_path = output_dir / f"checkpoint_best_{metric_name}.pth"
+    to_save = {
+        "model": model_without_ddp.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "lr_schedule": lr_schedule.state_dict(),
+        "epoch": epoch,
+        "scaler": loss_scaler.state_dict() if loss_scaler is not None else None,
+        "args": args,
+        "best_metric_name": metric_name,
+        "best_metric_value": metric_value,
+    }
+    save_on_master(to_save, checkpoint_path)
+
+
 def load_model(args, model_without_ddp, optimizer, loss_scaler, lr_schedule):
     if args.resume:
         if args.resume.startswith("https"):
@@ -54,6 +91,10 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler, lr_schedule):
             checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
         print("Resume checkpoint %s" % args.resume)
+        if "best_metric_value" in checkpoint:
+            args.best_metric_value = checkpoint["best_metric_value"]
+        elif "args" in checkpoint and hasattr(checkpoint["args"], "best_metric_value"):
+            args.best_metric_value = checkpoint["args"].best_metric_value
         if (
             "optimizer" in checkpoint
             and "epoch" in checkpoint

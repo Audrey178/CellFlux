@@ -26,9 +26,15 @@ from training import distributed_mode
 from training.data_transform import get_train_transform
 from training.eval_loop import eval_model
 from training.grad_scaler import NativeScalerWithGradNormCount as NativeScaler
-from training.load_and_save import load_model, save_model
+from training.load_and_save import (
+    best_metric_default,
+    is_better_metric,
+    load_model,
+    save_best_model,
+    save_model,
+)
 from training.train_loop import my_train_one_epoch
-from training.dataloader import CellDataLoader
+from training.dataloader import CTPETDataLoader
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +56,9 @@ def main(args):
             json.dump(vars(args), f, indent=4)
 
     device = torch.device(args.device)
+    args.best_metric_value = getattr(
+        args, "best_metric_value", best_metric_default(getattr(args, "best_metric", "mae"))
+    )
 
     seed = args.seed + distributed_mode.get_rank()
     torch.manual_seed(seed)
@@ -59,13 +68,13 @@ def main(args):
 
     logger.info(f"Initializing Dataset: {args.dataset}")
     transform_train = get_train_transform()
-    if args.dataset in ['bbbc021', 'rxrx1', 'cpg0000']:
+    if args.dataset in ["bbbc021", "rxrx1", "cpg0000", "ctpet"]:
         args.num_tasks = distributed_mode.get_world_size()
         num_tasks = args.num_tasks
         args.global_rank = distributed_mode.get_rank()
         global_rank = args.global_rank
         logger.info("Intializing DataLoader")
-        datamodule = CellDataLoader(args)
+        datamodule = CTPETDataLoader(args)
         data_loader_train = datamodule.train_dataloader()
         data_loader_test = datamodule.test_dataloader()
     else:
@@ -196,6 +205,25 @@ def main(args):
                 logger.info(log_stats)
             except:
                 pass
+            if (
+                not args.eval_only
+                and args.output_dir
+                and getattr(args, "best_metric", None) in eval_stats
+            ):
+                metric_name = args.best_metric
+                metric_value = eval_stats[metric_name]
+                if is_better_metric(metric_name, metric_value, args.best_metric_value):
+                    args.best_metric_value = metric_value
+                    save_best_model(
+                        args=args,
+                        epoch=epoch,
+                        metric_name=metric_name,
+                        metric_value=metric_value,
+                        model_without_ddp=model_without_ddp,
+                        optimizer=optimizer,
+                        lr_schedule=lr_schedule,
+                        loss_scaler=loss_scaler,
+                    )
         if args.output_dir and distributed_mode.is_main_process():
             with open(
                 os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8"

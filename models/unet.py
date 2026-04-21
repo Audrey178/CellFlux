@@ -477,7 +477,6 @@ class UNetModel(nn.Module):
     with_fourier_features: bool = False
     ignore_time: bool = False
     input_projection: bool = True
-    condition_dim: int = 1224 # 1225 for cpg000, 1024 for bbbc021, 200 for rxrx1
 
     image_size: int = -1  # not used...
     _target_: str = "lib.models.gd_unet.UNetModel"
@@ -493,7 +492,6 @@ class UNetModel(nn.Module):
 
         self.time_embed_dim = self.model_channels * 4
         
-        self.mol_embed_transform = nn.Linear(self.condition_dim, self.time_embed_dim)
         if self.ignore_time:
             self.time_embed = lambda x: torch.zeros(
                 x.shape[0], self.time_embed_dim, device=x.device, dtype=x.dtype
@@ -700,9 +698,9 @@ class UNetModel(nn.Module):
         h = x
         # import pdb; pdb.set_trace()
         if "concat_conditioning" in extra:
-            # h = torch.cat([x, extra["concat_conditioning"]], dim=1)
-            mol_embedding = self.mol_embed_transform(extra["concat_conditioning"])
-            emb = emb + mol_embedding
+            h = torch.cat([x, extra["concat_conditioning"]], dim=1)
+            # mol_embedding = self.mol_embed_transform(extra["concat_conditioning"])
+            # emb = emb + mol_embedding
 
         for module in self.input_blocks:
             h = module(h, emb)

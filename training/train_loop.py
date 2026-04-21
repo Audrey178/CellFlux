@@ -10,19 +10,42 @@ import math
 import random
 import time
 from typing import Iterable
-from training.dataloader import CellDataLoader
+from training.dataloader import CTPETDataLoader
 import torch
 from flow_matching.path import CondOTProbPath, MixtureDiscreteProbPath
 from flow_matching.path.scheduler import PolynomialConvexScheduler
 from models.ema import EMA
 from torch.nn.parallel import DistributedDataParallel
-from torchmetrics.aggregation import MeanMetric
 from training.grad_scaler import NativeScalerWithGradNormCount
+
+try:
+    from torchmetrics.aggregation import MeanMetric
+except ImportError:  # pragma: no cover - dependency is declared in environment.yml
+    class MeanMetric:
+        def __init__(self):
+            self.reset()
+
+        def to(self, *args, **kwargs):
+            return self
+
+        def reset(self):
+            self.total = 0.0
+            self.count = 0
+
+        def update(self, value):
+            self.total += float(value.detach().cpu())
+            self.count += 1
+
+        def compute(self):
+            if self.count == 0:
+                return torch.tensor(0.0)
+            return torch.tensor(self.total / self.count)
 
 logger = logging.getLogger(__name__)
 
 MASK_TOKEN = 256
 PRINT_FREQUENCY = 50
+
 
 
 def skewed_timestep_sample(num_samples: int, device: torch.device) -> torch.Tensor:
@@ -44,7 +67,7 @@ def my_train_one_epoch(
     epoch: int,
     loss_scaler: NativeScalerWithGradNormCount,
     args: argparse.Namespace,
-    datamodule: CellDataLoader,
+    datamodule: CTPETDataLoader,
     use_initial: int,
 ):
     gc.collect()
@@ -66,18 +89,16 @@ def my_train_one_epoch(
             if data_iter_step > 0 and args.test_run:
                 break
         
-        x_real, y_trg, y_mod = batch['X'], batch['mols'], batch['y_id']
-        x_real_ctrl, x_real_trt = x_real
-        x_real_ctrl, x_real_trt = x_real_ctrl.to(device), x_real_trt.to(device)
-        y_trg = y_trg.long().to(device)            
-        y_org = None 
-        z_emb_trg = datamodule.embedding_matrix(y_trg).to(device)
+        x_real = batch['X']
+        x_real_ct, x_real_pet = x_real
+        x_real_ct, x_real_pet = x_real_ct.to(device), x_real_pet.to(device)           
         samples = None
         labels = None
+        
         if torch.rand(1) < args.class_drop_prob:
             conditioning = {}
         else:
-            conditioning = {"concat_conditioning": z_emb_trg}
+            conditioning = {"label": x_real_pet}
         
         if args.discrete_flow_matching:
             samples = (samples * 255.0).to(torch.long)
@@ -93,21 +114,21 @@ def my_train_one_epoch(
             ).mean()
         else:
             if args.skewed_timesteps:
-                t = skewed_timestep_sample(x_real_ctrl.shape[0], device=device)
+                t = skewed_timestep_sample(x_real_ct.shape[0], device=device)
             else:
-                t = torch.torch.rand(x_real_ctrl.shape[0]).to(device)
+                t = torch.torch.rand(x_real_ct.shape[0]).to(device)
             if use_initial == 1:
-                x_0 = x_real_ctrl
+                x_0 = x_real_ct
             elif use_initial == 2:
                 p_r = random.random()
                 if p_r > args.noise_prob:
-                    x_0 = x_real_ctrl
+                    x_0 = x_real_ct
                 else:
-                    x_0 = x_real_ctrl + torch.randn(x_real_ctrl.shape, dtype=torch.float32, device=device) * args.noise_level
+                    x_0 = x_real_ct + torch.randn(x_real_ct.shape, dtype=torch.float32, device=device) * args.noise_level
             else:
-                x_0 = torch.randn(x_real_ctrl.shape, dtype=torch.float32, device=device)
+                x_0 = torch.randn(x_real_ct.shape, dtype=torch.float32, device=device)
             
-            path_sample = path.sample(t=t, x_0=x_0, x_1=x_real_trt)
+            path_sample = path.sample(t=t, x_0=x_0, x_1=x_real_pet)
             x_t = path_sample.x_t
             u_t = path_sample.dx_t
 

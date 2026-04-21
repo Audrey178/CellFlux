@@ -1,196 +1,100 @@
 import torch
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 import numpy as np
 from pathlib import Path
+from torchvision.transforms import InterpolationMode
 
-class CustomTransform:
-    """Class for scaling and resizing an input image, with optional augmentation and normalization."""
-    
-    def __init__(self, augment=False, normalize=False, dim=0):
-        """
-        Initialize the CustomTransform instance.
-        
-        Args:
-            augment (bool, optional): Whether to apply augmentation (random flips). Defaults to False.
-            normalize (bool, optional): Whether to normalize the image. Defaults to False.
-            dim (int, optional): Dimension along which the normalization is applied. Defaults to 0.
-        """
-        self.augment = augment 
-        self.normalize = normalize 
-        self.dim = dim
-        
-    def __call__(self, X):
-        """
-        Apply the transformations to the input image.
-        
-        Args:
-            X (torch.Tensor): Input image tensor.
-            
-        Returns:
-            torch.Tensor: Transformed image tensor.
-        """
-        # Add random noise and rescale pixels between 0 and 1
-        random_noise = torch.rand_like(X)  # Generate random noise
-        X = (X + random_noise) / 255.0  # Scale to 0-1 range
-        
-        t = []
-        # Normalize the input to the range [-1, 1]
-        if self.normalize:
-            num_channels = X.shape[self.dim]
-            mean = [0.5] * num_channels
-            std = [0.5] * num_channels
-            t.append(T.Normalize(mean=mean, std=std))
-        
-        # Perform augmentation steps
+try:
+    import pydicom
+except ImportError:  # pragma: no cover - dependency is declared in environment.yml
+    pydicom = None
+
+
+def _read_dicom_pixels(path):
+    if pydicom is None:
+        raise ImportError(
+            "pydicom is required for the ctpet dataset. Install it from environment.yml."
+        )
+    return pydicom.dcmread(path).pixel_array.astype(np.float32)
+
+
+def min_max_normalize(image, eps=1e-6):
+    img_min = torch.min(image)
+    img_max = torch.max(image)
+    scale = torch.clamp(img_max - img_min, min=eps)
+    return (image - img_min) / scale
+
+
+class CTPETTransform:
+    """Preprocess paired CT/PET slices with shared resize and augmentation."""
+
+    def __init__(self, image_size=256, augment=False, normalize=True):
+        self.image_size = image_size
+        self.augment = augment
+        self.normalize = normalize
+
+    def _resize(self, image):
+        return TF.resize(
+            image,
+            [self.image_size, self.image_size],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+
+    def __call__(self, ct_image, pet_image):
+        ct_image = min_max_normalize(ct_image)
+        pet_image = min_max_normalize(pet_image)
+
+        ct_image = self._resize(ct_image)
+        pet_image = self._resize(pet_image)
+
         if self.augment:
-            t.append(T.RandomHorizontalFlip(p=0.3))
-            t.append(T.RandomVerticalFlip(p=0.3))
+            if torch.rand(1).item() < 0.5:
+                ct_image = TF.hflip(ct_image)
+                pet_image = TF.hflip(pet_image)
+            if torch.rand(1).item() < 0.5:
+                ct_image = TF.vflip(ct_image)
+                pet_image = TF.vflip(pet_image)
 
-        trans = T.Compose(t)
-        return trans(X)
+        if self.normalize:
+            ct_image = ct_image * 2.0 - 1.0
+            pet_image = pet_image * 2.0 - 1.0
 
-def read_files_pert(file_names, mols, mol2id, y2id, dose, y, transform, image_path, dataset_name, idx, multimodal, batch, iter_ctrl):
+        return ct_image, pet_image
+    
+def read_files_dicom(file_name, ct_dir, pet_dir, transform , dataset_name):
     """
-    Read and process control and treated batch images.
+    Read and process DICOM images for CT and PET scans.
     
     Args:
-        file_names (dict): Dictionary containing file names for 'ctrl' and 'trt' samples.
-        mols (dict): Dictionary containing molecule information for 'ctrl' and 'trt' samples.
-        mol2id (dict): Mapping from molecule names to IDs.
-        y2id (dict): Mapping from annotation names to IDs.
-        dose (dict): Dictionary containing dose information for 'ctrl' and 'trt' samples.
-        y (dict): Dictionary containing annotation information for 'ctrl' and 'trt' samples.
+        file_name (str): Name of the file containing the sample information.
+        ct_dir (str): Directory containing CT scan images.
+        pet_dir (str): Directory containing PET scan images.
         transform (callable): Transformation to apply to the images.
-        image_path (str): Path to the image folder.
         dataset_name (str): Name of the dataset.
-        idx (int): Index of the sample to retrieve.
-        multimodal (bool): Whether the dataset is multimodal.
-    
     Returns:
-        dict: Dictionary containing processed images, molecule information, annotation ID, dose, and file names.
+        dict: Dictionary containing processed CT and PET images, and the file name.
     """
-    if iter_ctrl:
-        # Sample control and treated batches 
-        img_file_ctrl = file_names["ctrl"][idx]
-        idx_trt = np.random.randint(0, len(file_names["trt"]))
-        img_file_trt = file_names["trt"][idx_trt]
-        idx_ctrl = idx
+    ct_path = Path(ct_dir) / file_name
+    pet_path = Path(pet_dir) / file_name
     
-    else: 
-        idx_trt = idx
-        # Use idx to select trt image and random select a ctrl image from the same batch
-        img_file_trt = file_names["trt"][idx_trt]
-        batch_trt = batch["trt"][idx_trt]
+    ct_image = _read_dicom_pixels(ct_path)
+    pet_image = _read_dicom_pixels(pet_path)
+    
+    ct_image = torch.from_numpy(ct_image).unsqueeze(0)  # Add channel dimension
+    pet_image = torch.from_numpy(pet_image).unsqueeze(0)  # Add channel dimension
+    
+    if transform:
+        ct_image, pet_image = transform(ct_image, pet_image)
 
-        ctrl_indices_same_batch = np.where(batch["ctrl"] == batch_trt)[0]
-        if len(ctrl_indices_same_batch) == 0:
-            raise ValueError(f"No control samples found in the same batch as the treated sample (batch: {batch_trt}).")
-
-        idx_ctrl = np.random.choice(ctrl_indices_same_batch)
-        img_file_ctrl = file_names["ctrl"][idx_ctrl]
-
-    # Split files 
-    file_split_ctrl = img_file_ctrl.split('-')
-    file_split_trt = img_file_trt.split('-')
-    
-    if len(file_split_ctrl) > 1:
-        file_split_ctrl = file_split_ctrl[1].split("_")
-        file_split_trt = file_split_trt[1].split("_")
-        path_ctrl = Path(image_path) / "_".join(file_split_ctrl[:2]) / file_split_ctrl[2]
-        path_trt = Path(image_path) / "_".join(file_split_trt[:2]) / file_split_trt[2]
-        file_ctrl = '_'.join(file_split_ctrl[3:]) + ".npy"
-        file_trt = '_'.join(file_split_trt[3:]) + ".npy"
-    else:
-        file_split_ctrl = file_split_ctrl[0].split("_")
-        file_split_trt = file_split_trt[0].split("_")
-        if dataset_name == "cpg0000":
-            path_ctrl = Path(image_path) / file_split_ctrl[0] / f"{file_split_ctrl[1]}_{file_split_ctrl[2]}"
-            path_trt = Path(image_path) / file_split_trt[0] / f"{file_split_trt[1]}_{file_split_trt[2]}"
-            file_ctrl = '_'.join(file_split_ctrl[1:]) + ".npy"
-            file_trt = '_'.join(file_split_trt[1:]) + ".npy"
-        elif dataset_name == "bbbc021":
-            path_ctrl = Path(image_path) / file_split_ctrl[0] / f"{file_split_ctrl[1]}"
-            path_trt = Path(image_path) / file_split_trt[0] / f"{file_split_trt[1]}"
-            file_ctrl = '_'.join(file_split_ctrl[2:]) + ".npy"
-            file_trt = '_'.join(file_split_trt[2:]) + ".npy"
-        
-    img_ctrl, img_trt = np.load(path_ctrl / file_ctrl), np.load(path_trt / file_trt)
-    img_ctrl, img_trt = torch.from_numpy(img_ctrl).float(), torch.from_numpy(img_trt).float()
-    img_ctrl, img_trt = img_ctrl.permute(2, 0, 1), img_trt.permute(2, 0, 1)  # Place channel dimension in front of the others 
-    img_ctrl, img_trt = transform(img_ctrl), transform(img_trt)
-    
-    if multimodal:
-        y_mod = y["trt"][idx_trt]
-        mol = mol2id[y_mod][mols["trt"][idx_trt]]
-    else:
-        mol = mol2id[mols["trt"][idx_trt]]
-    
     return {
-        'X': (img_ctrl, img_trt),
-        'mols': mol,
-        'y_id': y2id[y["trt"][idx_trt]],
-        'dose': dose["trt"][idx_trt],
-        'file_names': (img_file_ctrl, img_file_trt),
-        'idx_trt': idx_trt,
-        'idx_ctrl': idx_ctrl,
-        'batch': batch_trt,
-    } if dataset_name == "bbbc021" else {
-        'X': (img_ctrl, img_trt),
-        'mols': mol,
-        'y_id': y2id[y["trt"][idx_trt]],
-        'file_names': (img_file_ctrl, img_file_trt),
-        'idx_trt': idx_trt,
-        'idx_ctrl': idx_ctrl,
-        'batch': batch_trt,
+        "X": (ct_image, pet_image),
+        "file_names": (file_name, file_name),
+        "idx_ct": 0,
+        "idx_pet": 0,
     }
 
-def read_files_batch(file_names, mols, mol2id, y2id, y, transform, image_path, dataset_name, idx):
-    """
-    Read and process batch images.
-    
-    Args:
-        file_names (list): List of file names for the samples.
-        mols (list): List of molecule information for the samples.
-        mol2id (dict): Mapping from molecule names to IDs.
-        y2id (dict): Mapping from annotation names to IDs.
-        y (list): List of annotation information for the samples.
-        transform (callable): Transformation to apply to the images.
-        image_path (str): Path to the image folder.
-        dataset_name (str): Name of the dataset.
-        idx (int): Index of the sample to retrieve.
-    
-    Returns:
-        dict: Dictionary containing processed image, molecule information, annotation ID, and file name.
-    """
-    img_file = file_names[idx]
-    file_split = img_file.split('-')
-    
-    if dataset_name == "rxrx1":
-        file_split = file_split[1].split("_")
-        path = Path(image_path) / "_".join(file_split[:2]) / file_split[2]
-        file = '_'.join(file_split[3:]) + ".npy"
-    elif dataset_name in ["bbbc021", "bbbc025"]:
-        file_split = file_split[0].split("_")
-        path = Path(image_path) / file_split[0] / file_split[1]
-        file = '_'.join(file_split[2:]) + ".npy"
-    else:
-        file_split = file_split[0].split("_")
-        path = Path(image_path) / file_split[0] / f"{file_split[1]}_{file_split[2]}"
-        file = '_'.join(file_split[1:]) + ".npy"
-        
-    img = np.load(path / file)
-    img = torch.from_numpy(img).float()
-    img = img.permute(2, 0, 1)  # Place channel dimension in front of the others 
-    img = transform(img)
-
-    mol = mol2id[mols[idx]]
-    
-    return {
-        'X': img,
-        'mols': mol,
-        'y_id': y2id[y[idx]],
-        'file_names': img_file
-    }
 
 def convert_6ch_to_3ch(images):
     """
